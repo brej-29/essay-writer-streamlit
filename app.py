@@ -6,6 +6,7 @@ import streamlit as st
 
 from core.config import get_secret, MissingSecretError
 from core.telemetry import configure_langsmith_from_secrets
+from core.schemas import EssayRunConfig
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("essay_writer")
@@ -24,7 +25,7 @@ with st.sidebar:
 
     model = st.selectbox(
         "Model",
-        options=["gpt-4o-mini", "gpt-4.1-mini", "gpt-4o"],
+        options=["gpt-4o-mini", "gpt-5-nano", "gpt-4.1-nano", "gpt-4.1-mini"],
         index=0,
         help="Default is cost-effective. You can switch to higher quality models if needed."
     )
@@ -91,7 +92,7 @@ if submitted:
         st.stop()
 
     # Store config in session state (we’ll use it in Step 4 when wiring LangGraph)
-    st.session_state["run_config"] = {
+    raw_config = {
         "model": model,
         "temperature": temperature,
         "tone": tone,
@@ -105,6 +106,14 @@ if submitted:
         "show_intermediates": show_intermediates,
         "task": task,
     }
+
+    try:
+        validated = EssayRunConfig(**raw_config)
+    except Exception as e:
+        st.error(f"Config validation failed: {e}")
+        st.stop()
+
+    st.session_state["run_config"] = validated.model_dump()
 
     st.success("Config captured ✅ (Next steps will wire the LangGraph pipeline.)")
     st.json(st.session_state["run_config"])
