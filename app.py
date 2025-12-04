@@ -7,6 +7,7 @@ import streamlit as st
 from core.config import get_secret, MissingSecretError
 from core.telemetry import configure_langsmith_from_secrets
 from core.schemas import EssayRunConfig
+from core.research import run_tavily_search, ResearchError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("essay_writer")
@@ -117,3 +118,27 @@ if submitted:
 
     st.success("Config captured ✅ (Next steps will wire the LangGraph pipeline.)")
     st.json(st.session_state["run_config"])
+    
+st.divider()
+st.subheader("🔎 Research Smoke Test (Step 3)")
+
+if use_research:
+    test_query = st.text_input(
+        "Test search query",
+        value="Latest trends in electric vehicles and urban air quality in India",
+        help="This is only for validating Tavily connectivity and formatting."
+    )
+
+    if st.button("Run Tavily test search"):
+        try:
+            notes = run_tavily_search(test_query, max_results=max_results)
+            if not notes:
+                st.warning("No notes returned.")
+            else:
+                st.success(f"Got {len(notes)} note blocks.")
+                for n in notes:
+                    st.markdown(n)
+        except ResearchError as e:
+            st.error(str(e))
+else:
+    st.info("Enable 'Use web research (Tavily)' in the sidebar to test.")
