@@ -8,6 +8,7 @@ from core.config import get_secret, MissingSecretError
 from core.telemetry import configure_langsmith_from_secrets
 from core.schemas import EssayRunConfig
 from core.research import run_tavily_search, ResearchError
+from core.graph import run_essay
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("essay_writer")
@@ -116,29 +117,79 @@ if submitted:
 
     st.session_state["run_config"] = validated.model_dump()
 
-    st.success("Config captured ✅ (Next steps will wire the LangGraph pipeline.)")
-    st.json(st.session_state["run_config"])
-    
-st.divider()
-st.subheader("🔎 Research Smoke Test (Step 3)")
+    st.info("Running the essay pipeline...")
 
-if use_research:
-    test_query = st.text_input(
-        "Test search query",
-        value="Latest trends in electric vehicles and urban air quality in India",
-        help="This is only for validating Tavily connectivity and formatting."
-    )
+    try:
+        result = run_essay(st.session_state["run_config"])
+    except Exception as e:
+        st.error(f"Essay generation failed: {e}")
+        st.stop()
 
-    if st.button("Run Tavily test search"):
-        try:
-            notes = run_tavily_search(test_query, max_results=max_results)
-            if not notes:
-                st.warning("No notes returned.")
-            else:
-                st.success(f"Got {len(notes)} note blocks.")
-                for n in notes:
-                    st.markdown(n)
-        except ResearchError as e:
-            st.error(str(e))
-else:
-    st.info("Enable 'Use web research (Tavily)' in the sidebar to test.")
+    # Store for later (including LangSmith trace id)
+    st.session_state["essay_result"] = {
+        "plan": result.plan,
+        "content_notes": result.content_notes,
+        "drafts": result.drafts,
+        "critiques": result.critiques,
+        "final": (result.drafts[-1] if result.drafts else ""),
+        "trace_id": result.trace_id,
+    }
+
+    st.success("Done ✅")
+
+if "essay_result" in st.session_state:
+    data = st.session_state["essay_result"]
+
+    tabs = st.tabs(["Outline", "Research notes", "Drafts", "Critiques", "Final + Download", "Debug"])
+    with tabs[0]:
+        st.subheader("Outline / Plan")
+        st.write(data.get("plan", ""))
+
+    with tabs[1]:
+        st.subheader("Research notes")
+        notes = data.get("content_notes", [])
+        if not notes:
+            st.info("No research notes (research disabled or none returned).")
+        else:
+            for n in notes:
+                st.markdown(n)
+
+    with tabs[2]:
+        st.subheader("Draft versions")
+        drafts = data.get("drafts", [])
+        if not drafts:
+            st.info("No drafts produced.")
+        else:
+            for i, d in enumerate(drafts, start=1):
+                st.markdown(f"### Draft v{i}")
+                st.write(d)
+
+    with tabs[3]:
+        st.subheader("Critiques")
+        critiques = data.get("critiques", [])
+        if not critiques:
+            st.info("No critiques produced (max revisions may be 0).")
+        else:
+            for i, c in enumerate(critiques, start=1):
+                st.markdown(f"### Critique v{i}")
+                st.write(c)
+
+    with tabs[4]:
+        st.subheader("Final Essay")
+        final = data.get("final", "")
+        st.write(final)
+
+        st.download_button(
+            "Download as Markdown",
+            data=final,
+            file_name="essay.md",
+            mime="text/markdown",
+        )
+
+        trace_id = data.get("trace_id")
+        if trace_id:
+            st.caption(f"LangSmith trace_id captured: {trace_id}")
+
+    with tabs[5]:
+        st.subheader("Debug")
+        st.json(data)
