@@ -5,6 +5,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from typing import Generator
 
 import streamlit as st
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -291,6 +292,100 @@ def run_essay(cfg_dict: Dict[str, Any]) -> EssayRunResult:
 
     return EssayRunResult(
         final_state=final_state_norm,
+        snapshots=snapshots,
+        drafts=drafts,
+        critiques=critiques,
+        plan=plan,
+        content_notes=content_notes,
+        trace_id=trace_id,
+    )
+
+def run_essay_stream(cfg_dict: Dict[str, Any]) -> Generator[Dict[str, Any], None, EssayRunResult]:
+    """
+    Stream node updates from LangGraph and yield events for the UI.
+    Uses LangGraph stream_mode="updates" so each chunk is {node_name: update_dict}. :contentReference[oaicite:2]{index=2}
+    At the end, returns EssayRunResult (via generator return).
+    """
+    cfg = EssayRunConfig(**cfg_dict)
+    graph = get_compiled_graph(cfg.model, cfg.temperature)
+
+    thread_id = cfg_dict.get("thread_id") or str(uuid.uuid4())
+    runnable_config = {"configurable": {"thread_id": thread_id}}
+
+    initial_state: AgentState = {
+        "task": cfg.task,
+        "max_revisions": cfg.max_revisions,
+        "revision_number": 1,
+        "content": [],
+        "config": cfg.model_dump(),
+    }
+
+    snapshots: List[Dict[str, Any]] = []
+    plan = ""
+    drafts: List[str] = []
+    critiques: List[str] = []
+    content_notes: List[str] = []
+    last_draft = None
+    last_critique = None
+    trace_id: Optional[str] = None
+
+    inputs = {"task": cfg.task, "config": cfg.model_dump()}
+
+    with trace(name="essay_writer_run", inputs=inputs) as root_run:
+        for chunk in graph.stream(
+            initial_state,
+            runnable_config,
+            stream_mode="updates",  # yields {node_name: update_dict} :contentReference[oaicite:3]{index=3}
+        ):
+            snapshots.append(chunk)
+
+            # Parse {node_name: update_dict}
+            node_name = next(iter(chunk.keys()))
+            update = chunk[node_name] if isinstance(chunk[node_name], dict) else {}
+
+            # Keep latest fields
+            if isinstance(update.get("plan"), str) and update["plan"].strip():
+                plan = update["plan"]
+
+            if isinstance(update.get("content"), list):
+                content_notes = update["content"]
+
+            if isinstance(update.get("draft"), str) and update["draft"].strip():
+                if update["draft"] != last_draft:
+                    drafts.append(update["draft"])
+                    last_draft = update["draft"]
+
+            if isinstance(update.get("critique"), str) and update["critique"].strip():
+                if update["critique"] != last_critique:
+                    critiques.append(update["critique"])
+                    last_critique = update["critique"]
+
+            # Yield a UI-friendly event
+            yield {
+                "type": "node_update",
+                "node": node_name,
+                "update": update,
+                "thread_id": thread_id,
+            }
+
+        # finalize trace
+        root_run.outputs = {"plan": plan, "drafts": len(drafts), "critiques": len(critiques)}
+        trace_id = str(root_run.id)
+
+    final_state = {
+        "task": cfg.task,
+        "plan": plan,
+        "content": content_notes,
+        "draft": drafts[-1] if drafts else "",
+        "critique": critiques[-1] if critiques else "",
+        "revision_number": cfg.max_revisions + 1,
+        "max_revisions": cfg.max_revisions,
+        "config": cfg.model_dump(),
+        "thread_id": thread_id,
+    }
+
+    return EssayRunResult(
+        final_state=final_state,
         snapshots=snapshots,
         drafts=drafts,
         critiques=critiques,

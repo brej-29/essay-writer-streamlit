@@ -9,6 +9,8 @@ from core.telemetry import configure_langsmith_from_secrets
 from core.schemas import EssayRunConfig
 from core.research import run_tavily_search, ResearchError
 from core.graph import run_essay
+from core.graph import run_essay_stream
+from core.feedback import submit_langsmith_feedback, FeedbackError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("essay_writer")
@@ -117,15 +119,66 @@ if submitted:
 
     st.session_state["run_config"] = validated.model_dump()
 
-    st.info("Running the essay pipeline...")
+    status = st.status("🚀 Running essay pipeline...", expanded=True)  # supports .update() :contentReference[oaicite:6]{index=6}
+
+    plan_ph = st.empty()
+    notes_ph = st.empty()
+    draft_ph = st.empty()
+    critique_ph = st.empty()
+
+    node_to_label = {
+        "planner": "🧠 Planning outline...",
+        "research_plan": "🔎 Researching for plan...",
+        "generate": "✍️ Writing / revising draft...",
+        "reflect": "🧑‍🏫 Critiquing draft...",
+        "research_critique": "🔎 Researching to address critique...",
+    }
 
     try:
-        result = run_essay(st.session_state["run_config"])
+        gen = run_essay_stream(st.session_state["run_config"])
+        result = None
+        while True:
+            try:
+                event = next(gen)  # advance generator manually
+            except StopIteration as si:
+                result = si.value  # <-- EssayRunResult is here
+                break
+
+            if event.get("type") != "node_update":
+                continue
+
+            node = event.get("node", "unknown")
+            update = event.get("update", {}) or {}
+
+            status.update(label=node_to_label.get(node, f"Running: {node}"), state="running")
+
+            if "plan" in update and isinstance(update["plan"], str):
+                plan_ph.subheader("Outline (live)")
+                plan_ph.write(update["plan"])
+
+            if "content" in update and isinstance(update["content"], list):
+                notes_ph.subheader("Research notes (live)")
+                for n in update["content"][-5:]:
+                    notes_ph.markdown(n)
+
+            if "draft" in update and isinstance(update["draft"], str):
+                draft_ph.subheader("Draft (live)")
+                draft_ph.write(update["draft"][:2000] + ("..." if len(update["draft"]) > 2000 else ""))
+
+            if "critique" in update and isinstance(update["critique"], str):
+                critique_ph.subheader("Critique (live)")
+                critique_ph.write(update["critique"])
+
+        if result is None:
+            raise RuntimeError("run_essay_stream finished but returned no result (unexpected).")
+
     except Exception as e:
+        status.update(label="❌ Failed", state="error", expanded=True)
         st.error(f"Essay generation failed: {e}")
         st.stop()
 
-    # Store for later (including LangSmith trace id)
+    status.update(label="✅ Completed", state="complete", expanded=False)
+
     st.session_state["essay_result"] = {
         "plan": result.plan,
         "content_notes": result.content_notes,
@@ -134,6 +187,7 @@ if submitted:
         "final": (result.drafts[-1] if result.drafts else ""),
         "trace_id": result.trace_id,
     }
+
 
     st.success("Done ✅")
 
@@ -186,9 +240,25 @@ if "essay_result" in st.session_state:
             mime="text/markdown",
         )
 
+        st.divider()
+        st.subheader("Feedback")
+
         trace_id = data.get("trace_id")
-        if trace_id:
-            st.caption(f"LangSmith trace_id captured: {trace_id}")
+        if not trace_id:
+            st.info("No LangSmith run id available for feedback.")
+        else:
+            rating = st.radio("Was this essay helpful?", ["👍 Yes", "👎 No"], horizontal=True)
+            comment = st.text_area("Optional feedback (what to improve?)", height=100)
+
+            if st.button("Submit feedback to LangSmith"):
+                try:
+                    score = 1 if rating.startswith("👍") else -1
+                    submit_langsmith_feedback(run_id=trace_id, score=score, comment=comment)
+                    st.success("Feedback submitted ✅")
+                except FeedbackError as e:
+                    st.error(str(e))
+                except Exception as e:
+                    st.error(f"Failed to submit feedback: {e}")
 
     with tabs[5]:
         st.subheader("Debug")
