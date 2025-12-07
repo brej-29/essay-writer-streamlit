@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import logging
 import streamlit as st
+import uuid
+from datetime import datetime
 
 from core.config import get_secret, MissingSecretError
 from core.telemetry import configure_langsmith_from_secrets
@@ -16,7 +18,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("essay_writer")
 
 st.set_page_config(page_title="Essay Writer", page_icon="📝", layout="wide")
+# --- Session init (persists across reruns for this user session) :contentReference[oaicite:3]{index=3}
+if "run_history" not in st.session_state:
+    st.session_state["run_history"] = []  # list[dict]
 
+if "selected_run_id" not in st.session_state:
+    st.session_state["selected_run_id"] = None
+
+if "live_ui_state" not in st.session_state:
+    st.session_state["live_ui_state"] = {}
 # --- Configure tracing (LangSmith) from secrets (optional at this stage)
 configure_langsmith_from_secrets()
 
@@ -55,6 +65,46 @@ with st.sidebar:
     st.divider()
     st.subheader("Debug")
     show_intermediates = st.toggle("Show intermediate outputs", value=True)
+    st.divider()
+    st.header("Run history")
+
+    history = st.session_state.get("run_history", [])
+    if not history:
+        st.caption("No runs yet.")
+    else:
+        # Newest first
+        options = [r["run_id"] for r in history]
+
+        def _label(run_id: str) -> str:
+            r = next((x for x in history if x["run_id"] == run_id), None)
+            if not r:
+                return run_id
+            t = r.get("ts", "")
+            task = (r.get("task", "") or "").strip().replace("\n", " ")
+            return f"{t} — {task[:50]}{'…' if len(task) > 50 else ''}"
+
+        selected = st.selectbox(
+            "Select a previous run",
+            options=options,
+            index=0,
+            format_func=_label,
+            key="history_select",
+        )
+
+        cols = st.columns(2)
+        with cols[0]:
+            if st.button("Load run", key="load_run_btn"):
+                chosen = next(r for r in history if r["run_id"] == selected)
+                st.session_state["essay_result"] = chosen["essay_result"]
+                st.session_state["selected_run_id"] = chosen["run_id"]
+                st.success("Loaded ✅")
+
+        with cols[1]:
+            if st.button("Clear history", key="clear_history_btn"):
+                st.session_state["run_history"] = []
+                st.session_state["selected_run_id"] = None
+                st.session_state.pop("essay_result", None)
+                st.success("Cleared ✅")
 
 # --- Main input form (batched submit)
 with st.form("essay_form"):
@@ -121,10 +171,36 @@ if submitted:
 
     status = st.status("🚀 Running essay pipeline...", expanded=True)  # supports .update() :contentReference[oaicite:6]{index=6}
 
-    plan_ph = st.empty()
-    notes_ph = st.empty()
-    draft_ph = st.empty()
-    critique_ph = st.empty()
+    # Unique run id for widget keys + history
+    ui_run_id = str(uuid.uuid4())
+
+    # Delta tracking to prevent flooding and show only new notes
+    st.session_state["live_ui_state"][ui_run_id] = {
+        "notes_idx": 0,        # how many notes we have already rendered
+        "notes_rendered": [],  # rendered notes (capped)
+        "drafts_seen": [],     # drafts (capped)
+        "critiques_seen": [],  # critiques (capped)
+    }
+
+    live_plan = st.expander("🧠 Plan (live)", expanded=True)
+    live_research = st.expander("🔎 Research notes (live)", expanded=True)
+    live_draft = st.expander("✍️ Draft (live)", expanded=True)
+    live_critique = st.expander("🧑‍🏫 Critique (live)", expanded=False)
+
+    with live_plan:
+        plan_ph = st.empty()
+
+    with live_research:
+        research_meta_ph = st.empty()
+        research_ph = st.empty()
+
+    with live_draft:
+        draft_meta_ph = st.empty()
+        draft_ph = st.empty()
+
+    with live_critique:
+        critique_meta_ph = st.empty()
+        critique_ph = st.empty()
 
     node_to_label = {
         "planner": "🧠 Planning outline...",
@@ -157,17 +233,47 @@ if submitted:
                 plan_ph.write(update["plan"])
 
             if "content" in update and isinstance(update["content"], list):
-                notes_ph.subheader("Research notes (live)")
-                for n in update["content"][-5:]:
-                    notes_ph.markdown(n)
+                ui = st.session_state["live_ui_state"][ui_run_id]
+                all_notes = update["content"]
+
+                start = ui["notes_idx"]
+                new_notes = all_notes[start:] if start < len(all_notes) else []
+
+                if new_notes:
+                    ui["notes_idx"] = len(all_notes)
+
+                    # Append and cap to last 30 to avoid UI flooding
+                    ui["notes_rendered"].extend(new_notes)
+                    ui["notes_rendered"] = ui["notes_rendered"][-30:]
+
+                    research_meta_ph.caption(
+                        f"Total notes: {len(all_notes)} | Showing last {len(ui['notes_rendered'])} | Newly added: {len(new_notes)}"
+                    )
+
+                    # Replace one placeholder (no duplicates)
+                    research_ph.markdown("\n\n---\n\n".join(ui["notes_rendered"]))
 
             if "draft" in update and isinstance(update["draft"], str):
-                draft_ph.subheader("Draft (live)")
-                draft_ph.write(update["draft"][:2000] + ("..." if len(update["draft"]) > 2000 else ""))
+                ui = st.session_state["live_ui_state"][ui_run_id]
+                d = update["draft"].strip()
+                if d:
+                    if not ui["drafts_seen"] or ui["drafts_seen"][-1] != d:
+                        ui["drafts_seen"].append(d)
+                        ui["drafts_seen"] = ui["drafts_seen"][-5:]  # keep last 5 versions
+
+                    draft_meta_ph.caption(f"Draft versions captured (live): {len(ui['drafts_seen'])}")
+                    draft_ph.write(d[:2500] + ("..." if len(d) > 2500 else ""))
 
             if "critique" in update and isinstance(update["critique"], str):
-                critique_ph.subheader("Critique (live)")
-                critique_ph.write(update["critique"])
+                ui = st.session_state["live_ui_state"][ui_run_id]
+                c = update["critique"].strip()
+                if c:
+                    if not ui["critiques_seen"] or ui["critiques_seen"][-1] != c:
+                        ui["critiques_seen"].append(c)
+                        ui["critiques_seen"] = ui["critiques_seen"][-5:]
+
+                    critique_meta_ph.caption(f"Critiques captured (live): {len(ui['critiques_seen'])}")
+                    critique_ph.write(c[:2500] + ("..." if len(c) > 2500 else ""))
 
         if result is None:
             raise RuntimeError("run_essay_stream finished but returned no result (unexpected).")
@@ -187,6 +293,19 @@ if submitted:
         "final": (result.drafts[-1] if result.drafts else ""),
         "trace_id": result.trace_id,
     }
+
+    # --- Save run to history (persist in this session) :contentReference[oaicite:8]{index=8}
+    run_record = {
+        "run_id": st.session_state["essay_result"].get("trace_id") or ui_run_id,
+        "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "task": st.session_state["run_config"]["task"],
+        "config": st.session_state["run_config"],
+        "essay_result": st.session_state["essay_result"],
+    }
+
+    st.session_state["run_history"].insert(0, run_record)
+    st.session_state["run_history"] = st.session_state["run_history"][:15]  # keep last 15 runs
+    st.session_state["selected_run_id"] = run_record["run_id"]
 
 
     st.success("Done ✅")
@@ -215,8 +334,8 @@ if "essay_result" in st.session_state:
             st.info("No drafts produced.")
         else:
             for i, d in enumerate(drafts, start=1):
-                st.markdown(f"### Draft v{i}")
-                st.write(d)
+                with st.expander(f"Draft v{i}", expanded=(i == len(drafts))):
+                    st.write(d)
 
     with tabs[3]:
         st.subheader("Critiques")
@@ -225,8 +344,8 @@ if "essay_result" in st.session_state:
             st.info("No critiques produced (max revisions may be 0).")
         else:
             for i, c in enumerate(critiques, start=1):
-                st.markdown(f"### Critique v{i}")
-                st.write(c)
+                with st.expander(f"Critique v{i}", expanded=(i == len(critiques))):
+                    st.write(c)
 
     with tabs[4]:
         st.subheader("Final Essay")
