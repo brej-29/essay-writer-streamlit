@@ -13,6 +13,7 @@ from core.research import run_tavily_search, ResearchError
 from core.graph import run_essay
 from core.graph import run_essay_stream
 from core.feedback import submit_langsmith_feedback, FeedbackError
+from core.exporters import build_export_bundle, ExportError
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("essay_writer")
@@ -169,7 +170,7 @@ if submitted:
 
     st.session_state["run_config"] = validated.model_dump()
 
-    status = st.status("🚀 Running essay pipeline...", expanded=True)  # supports .update() :contentReference[oaicite:6]{index=6}
+    status = st.status("🚀 Running essay pipeline...", expanded=False)  # supports .update() :contentReference[oaicite:6]{index=6}
 
     # Unique run id for widget keys + history
     ui_run_id = str(uuid.uuid4())
@@ -294,6 +295,20 @@ if submitted:
         "trace_id": result.trace_id,
     }
 
+    try:
+        title = "Essay"
+        final_text = st.session_state["essay_result"].get("final", "")
+        bundle = build_export_bundle(title=title, essay_text=final_text)
+
+        st.session_state["essay_result"]["exports"] = {
+            "essay.md": bundle.md,
+            "essay.txt": bundle.txt,
+            "essay.docx": bundle.docx,
+            "essay.pdf": bundle.pdf,
+        }
+    except ExportError as e:
+        st.session_state["essay_result"]["exports_error"] = str(e)
+
     # --- Save run to history (persist in this session) :contentReference[oaicite:8]{index=8}
     run_record = {
         "run_id": st.session_state["essay_result"].get("trace_id") or ui_run_id,
@@ -352,12 +367,47 @@ if "essay_result" in st.session_state:
         final = data.get("final", "")
         st.write(final)
 
-        st.download_button(
-            "Download as Markdown",
-            data=final,
-            file_name="essay.md",
-            mime="text/markdown",
-        )
+        exports_error = data.get("exports_error")
+        exports = data.get("exports", {})
+
+        if exports_error:
+            st.warning(f"Export generation issue: {exports_error}")
+
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            st.download_button(
+                "Download .md",
+                data=exports.get("essay.md", final.encode("utf-8")),
+                file_name="essay.md",
+                mime="text/markdown",
+            )
+
+        with col2:
+            st.download_button(
+                "Download .txt",
+                data=exports.get("essay.txt", final.encode("utf-8")),
+                file_name="essay.txt",
+                mime="text/plain",
+            )
+
+        with col3:
+            st.download_button(
+                "Download .docx",
+                data=exports.get("essay.docx", b""),
+                file_name="essay.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                disabled=("essay.docx" not in exports),
+            )
+
+        with col4:
+            st.download_button(
+                "Download .pdf",
+                data=exports.get("essay.pdf", b""),
+                file_name="essay.pdf",
+                mime="application/pdf",
+                disabled=("essay.pdf" not in exports),
+            )
 
         st.divider()
         st.subheader("Feedback")
