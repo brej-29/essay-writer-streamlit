@@ -9,8 +9,6 @@ from datetime import datetime
 from core.config import get_secret, MissingSecretError
 from core.telemetry import configure_langsmith_from_secrets
 from core.schemas import EssayRunConfig
-from core.research import run_tavily_search, ResearchError
-from core.graph import run_essay
 from core.graph import run_essay_stream
 from core.feedback import submit_langsmith_feedback, FeedbackError
 from core.exporters import build_export_bundle, ExportError
@@ -19,7 +17,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("essay_writer")
 
 st.set_page_config(page_title="Essay Writer", page_icon="📝", layout="wide")
-# --- Session init (persists across reruns for this user session) :contentReference[oaicite:3]{index=3}
+# --- Session init (persists across reruns for this user session)
 if "run_history" not in st.session_state:
     st.session_state["run_history"] = []  # list[dict]
 
@@ -32,7 +30,7 @@ if "live_ui_state" not in st.session_state:
 configure_langsmith_from_secrets()
 
 st.title("📝 Essay Writer (LangGraph + Research + Revisions)")
-st.caption("Step 1: UI shell + secrets setup. Pipeline wiring comes in Step 4.")
+st.caption("Research-assisted essay generator with revision loop + LangSmith tracing & feedback.")
 
 # --- Sidebar controls
 with st.sidebar:
@@ -170,7 +168,7 @@ if submitted:
 
     st.session_state["run_config"] = validated.model_dump()
 
-    status = st.status("🚀 Running essay pipeline...", expanded=False)  # supports .update() :contentReference[oaicite:6]{index=6}
+    status = st.status("🚀 Running essay pipeline...", expanded=False)
 
     # Unique run id for widget keys + history
     ui_run_id = str(uuid.uuid4())
@@ -309,13 +307,16 @@ if submitted:
     except ExportError as e:
         st.session_state["essay_result"]["exports_error"] = str(e)
 
-    # --- Save run to history (persist in this session) :contentReference[oaicite:8]{index=8}
+    essay_result_slim = dict(st.session_state["essay_result"])
+    essay_result_slim.pop("exports", None)
+    essay_result_slim.pop("exports_error", None)
+
     run_record = {
-        "run_id": st.session_state["essay_result"].get("trace_id") or ui_run_id,
+        "run_id": essay_result_slim.get("trace_id") or ui_run_id,
         "ts": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "task": st.session_state["run_config"]["task"],
         "config": st.session_state["run_config"],
-        "essay_result": st.session_state["essay_result"],
+        "essay_result": essay_result_slim,
     }
 
     st.session_state["run_history"].insert(0, run_record)
@@ -431,4 +432,9 @@ if "essay_result" in st.session_state:
 
     with tabs[5]:
         st.subheader("Debug")
-        st.json(data)
+        debug = dict(data)
+        if "exports" in debug:
+            debug["exports"] = {
+                k: f"{len(v)} bytes" for k, v in (debug.get("exports") or {}).items()
+            }
+        st.json(debug)
