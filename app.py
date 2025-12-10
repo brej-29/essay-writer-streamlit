@@ -12,6 +12,7 @@ from core.schemas import EssayRunConfig
 from core.graph import run_essay_stream
 from core.feedback import submit_langsmith_feedback, FeedbackError
 from core.exporters import build_export_bundle, ExportError
+from core.bundle_zip import build_run_bundle_zip
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("essay_writer")
@@ -95,6 +96,7 @@ with st.sidebar:
             if st.button("Load run", key="load_run_btn"):
                 chosen = next(r for r in history if r["run_id"] == selected)
                 st.session_state["essay_result"] = chosen["essay_result"]
+                st.session_state["run_config"] = chosen.get("config", st.session_state.get("run_config", {}))
                 st.session_state["selected_run_id"] = chosen["run_id"]
                 st.success("Loaded ✅")
 
@@ -167,7 +169,7 @@ if submitted:
         st.stop()
 
     st.session_state["run_config"] = validated.model_dump()
-
+    
     status = st.status("🚀 Running essay pipeline...", expanded=False)
 
     # Unique run id for widget keys + history
@@ -329,7 +331,15 @@ if submitted:
 if "essay_result" in st.session_state:
     data = st.session_state["essay_result"]
 
-    tabs = st.tabs(["Outline", "Research notes", "Drafts", "Critiques", "Final + Download", "Debug"])
+    cfg = st.session_state.get("run_config", {})
+    show_debug = bool(cfg.get("show_intermediates", True))
+
+    tab_labels = ["Outline", "Research notes", "Drafts", "Critiques", "Final + Download"]
+    if show_debug:
+        tab_labels.append("Debug")
+
+    tabs = st.tabs(tab_labels)
+
     with tabs[0]:
         st.subheader("Outline / Plan")
         st.write(data.get("plan", ""))
@@ -409,6 +419,28 @@ if "essay_result" in st.session_state:
                 mime="application/pdf",
                 disabled=("essay.pdf" not in exports),
             )
+        
+        st.divider()
+        st.subheader("Run bundle (ZIP)")
+
+        # Build once per displayed run (keep in memory; Streamlit stores download data in-memory) :contentReference[oaicite:2]{index=2}
+        if "bundle_zip" not in data:
+            data["bundle_zip"] = build_run_bundle_zip(
+                essay_result=data,
+                run_config=st.session_state.get("run_config", {}),
+            )
+
+        zip_bytes = data["bundle_zip"]
+        zip_name = "essay_run_bundle.zip"
+
+        st.download_button(
+            "Download full run bundle (.zip)",
+            data=zip_bytes,
+            file_name=zip_name,
+            mime="application/zip",
+        )
+        st.caption("Includes plan + research notes + drafts + critiques + final (+ config/metadata).")
+
 
         st.divider()
         st.subheader("Feedback")
@@ -430,11 +462,12 @@ if "essay_result" in st.session_state:
                 except Exception as e:
                     st.error(f"Failed to submit feedback: {e}")
 
-    with tabs[5]:
-        st.subheader("Debug")
-        debug = dict(data)
-        if "exports" in debug:
-            debug["exports"] = {
-                k: f"{len(v)} bytes" for k, v in (debug.get("exports") or {}).items()
-            }
-        st.json(debug)
+    if show_debug:
+        with tabs[-1]:
+            st.subheader("Debug")
+            debug = dict(data)
+            if "exports" in debug:
+                debug["exports"] = {k: f"{len(v)} bytes" for k, v in (debug.get("exports") or {}).items()}
+            if "bundle_zip" in debug:
+                debug["bundle_zip"] = f"{len(debug['bundle_zip'])} bytes"
+            st.json(debug)
