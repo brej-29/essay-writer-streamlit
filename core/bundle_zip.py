@@ -50,7 +50,15 @@ def build_run_bundle_zip(
         zf.writestr("plan.md", plan or "# Plan\n\n(No plan captured)\n")
         zf.writestr("research_notes.md", notes_md or "# Research notes\n\n(No research notes)\n")
         zf.writestr("final.md", final or "# Final\n\n(No final essay)\n")
+        exports = essay_result.get("exports") or {}
 
+        docx_bytes = exports.get("essay.docx")
+        if isinstance(docx_bytes, (bytes, bytearray)) and len(docx_bytes) > 0:
+            zf.writestr("exports/essay.docx", bytes(docx_bytes))
+
+        pdf_bytes = exports.get("essay.pdf")
+        if isinstance(pdf_bytes, (bytes, bytearray)) and len(pdf_bytes) > 0:
+            zf.writestr("exports/essay.pdf", bytes(pdf_bytes))
         # Drafts
         if drafts:
             for i, d in enumerate(drafts, start=1):
@@ -75,6 +83,8 @@ def build_run_bundle_zip(
             "- drafts/: versioned drafts\n"
             "- critiques/: versioned critiques\n"
             "- final.md: final essay\n"
+            "- exports/essay.docx: Word export (if available)\n"
+            "- exports/essay.pdf: PDF export (if available)\n"
             "- config.json: run configuration (if available)\n"
             "- metadata.json: trace_id and counts\n"
         )

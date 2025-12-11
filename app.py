@@ -64,7 +64,7 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Debug")
-    show_intermediates = st.toggle("Show intermediate outputs", value=True)
+    show_intermediates = st.toggle("Show Complete process JSON", value=True)
     st.divider()
     st.header("Run history")
 
@@ -186,7 +186,7 @@ if submitted:
     live_plan = st.expander("🧠 Plan (live)", expanded=True)
     live_research = st.expander("🔎 Research notes (live)", expanded=True)
     live_draft = st.expander("✍️ Draft (live)", expanded=True)
-    live_critique = st.expander("🧑‍🏫 Critique (live)", expanded=False)
+    live_critique = st.expander("🧑‍🏫 Critique (live)", expanded=True)
 
     with live_plan:
         plan_ph = st.empty()
